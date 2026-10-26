@@ -13,7 +13,12 @@ import (
 // Only the first Badger instance resolves identity. Subsequent instances use
 // private process context, which cannot be supplied in an HTTP request header.
 type identityContextKey struct{}
-type requestIdentity struct{ client, host, scheme, port string }
+type requestIdentity struct {
+	client, host, scheme, port                          string
+	transport, originalHost, profile, generation, scope string
+	assertions                                          http.Header
+	authoritative                                       bool
+}
 
 func member(address net.IP, networks []*net.IPNet) bool {
 	for _, network := range networks {
@@ -224,14 +229,35 @@ func (p *Badger) identity(req *http.Request) (requestIdentity, error) {
 
 func (p *Badger) applyClientIdentity(req *http.Request) (string, error) {
 	identity, present := req.Context().Value(identityContextKey{}).(requestIdentity)
+	if present && (!p.profilelessConsumer() || !identity.authoritative) {
+		original := req.Clone(req.Context())
+		original.Header = identity.assertions.Clone()
+		original.Host = identity.originalHost
+		candidate, err := p.identity(original)
+		if err != nil || candidate.client != identity.client || candidate.host != identity.host || candidate.scheme != identity.scheme || candidate.port != identity.port {
+			return "", fmt.Errorf("incompatible client identity profile")
+		}
+	}
+	if present && (identity.transport != req.RemoteAddr || identity.originalHost != req.Host ||
+		req.Header.Get(xRealIP) != identity.client || req.Header.Get(xForwardFor) != identity.client ||
+		req.Header.Get("X-Forwarded-Host") != identity.host || req.Header.Get(xForwardProto) != identity.scheme ||
+		req.Header.Get("X-Forwarded-Port") != identity.port) {
+		return "", fmt.Errorf("client identity request binding changed")
+	}
 	if !present {
 		var err error
 		identity, err = p.identity(req)
 		if err != nil {
 			return "", err
 		}
-		*req = *req.WithContext(context.WithValue(req.Context(), identityContextKey{}, identity))
+		identity.transport, identity.originalHost = req.RemoteAddr, req.Host
+		identity.assertions = req.Header.Clone()
 	}
+	if p.authoritativeIngress {
+		identity.authoritative = true
+		identity.profile, identity.generation, identity.scope = p.identityProfile, p.identityGeneration, p.identityScope
+	}
+	*req = *req.WithContext(context.WithValue(req.Context(), identityContextKey{}, identity))
 	req.Header.Set(xForwardFor, identity.client)
 	req.Header.Set(xRealIP, identity.client)
 	req.Header.Set("X-Forwarded-Host", identity.host)
@@ -244,4 +270,9 @@ func (p *Badger) applyClientIdentity(req *http.Request) (string, error) {
 		req.Header.Set(p.realIPHeader, identity.client)
 	}
 	return identity.client, nil
+}
+
+func (p *Badger) profilelessConsumer() bool {
+	return !p.authoritativeIngress && p.identityProfile == "" && p.identityGeneration == "" &&
+		len(p.trustedProxyIP) == 0 && len(p.allowedHosts) == 0 && len(p.allowedSchemes) == 0
 }

@@ -25,6 +25,10 @@ type Config struct {
 	TrustedProxyIPs             []string `json:"trustedProxyIPs,omitempty"`
 	AllowedHosts                []string `json:"allowedHosts,omitempty"`
 	AllowedSchemes              []string `json:"allowedSchemes,omitempty"`
+	AuthoritativeIngress        bool     `json:"authoritativeIngress,omitempty"`
+	IdentityProfile             string   `json:"identityProfile,omitempty"`
+	IdentityGeneration          string   `json:"identityGeneration,omitempty"`
+	IdentityScope               string   `json:"identityScope,omitempty"`
 	DisableDefaultCFIPs         bool     `json:"disableDefaultCFIPs,omitempty"`
 	CustomIPHeader              string   `json:"customIPHeader,omitempty"`
 	RealIPHeader                string   `json:"realIpHeader,omitempty"`
@@ -65,6 +69,10 @@ type Badger struct {
 	trustedProxyIP              []*net.IPNet
 	allowedHosts                []string
 	allowedSchemes              []string
+	authoritativeIngress        bool
+	identityProfile             string
+	identityGeneration          string
+	identityScope               string
 	customIPHeader              string
 	realIPHeader                string
 	remoteUserIDHeader          string
@@ -152,6 +160,10 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		customIPHeader:              config.CustomIPHeader,
 		allowedHosts:                config.AllowedHosts,
 		allowedSchemes:              config.AllowedSchemes,
+		authoritativeIngress:        config.AuthoritativeIngress,
+		identityProfile:             config.IdentityProfile,
+		identityGeneration:          config.IdentityGeneration,
+		identityScope:               config.IdentityScope,
 		realIPHeader:                config.RealIPHeader,
 		remoteUserIDHeader:          stringOrDefault(config.RemoteUserIDHeader, defaultRemoteUserIDHeader),
 		remoteVirtualApiKeyIDHeader: stringOrDefault(config.RemoteVirtualApiKeyIDHeader, defaultRemoteVirtualApiKeyIDHeader),
@@ -204,6 +216,9 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 			return nil, fmt.Errorf("broad private or global forwarding trust is forbidden")
 		}
 		badger.trustedProxyIP = append(badger.trustedProxyIP, network)
+	}
+	if config.AuthoritativeIngress && (config.IdentityProfile == "" || config.IdentityGeneration == "" || config.IdentityScope == "") {
+		return nil, fmt.Errorf("authoritative ingress requires profile, generation and scope")
 	}
 	return badger, nil
 }

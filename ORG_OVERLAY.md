@@ -24,10 +24,17 @@ context. Without a host declaration, a trusted forwarded authority must equal
 the current Host. Scheme is always HTTP/HTTPS. Global and broad private proxy
 trust is rejected. No PROXY protocol or insecure forwarding is enabled.
 
-A private request-context record preserves the normalized result across multiple
-Badger instances in one Traefik chain, including Pangolin-generated middleware.
-HTTP headers cannot manufacture that record. Cross-process trust still requires
-explicit exact peers on each receiving leg; backend application proof is separate.
+A renderer-designated `authoritativeIngress` with `identityProfile`,
+`identityGeneration` and `identityScope` mints a private request-context proof.
+A profileless legacy Pangolin-generated consumer can consume only that proof,
+bound to the unchanged transport, Host and canonical forwarding fields. A normal
+instance cannot mint delegated authority. An explicitly configured identity
+profile re-resolves the original assertions under its own policy and rejects
+mismatch; a stricter profile is never bypassed by context reuse. Set profile and
+generation on consumers that declare identity policy, rather than relying on
+legacy CDN options alone. HTTP headers cannot manufacture the private proof.
+Cross-process trust requires explicit exact peers on each receiving leg;
+backend application proof is separate.
 
 Downstream generators must pin an org commit, copy runtime Go sources and plugin
 manifest together, and record all payload hashes. Do not label the resulting

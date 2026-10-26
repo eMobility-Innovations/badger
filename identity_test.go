@@ -58,7 +58,7 @@ func TestRepeatedMiddlewarePreservesCanonicalClient(t *testing.T) {
 		if r.Header.Get(xRealIP) != "203.0.113.9" || r.Header.Get(xForwardProto) != "https" || r.Header.Get("X-Forwarded-Port") != "8443" {
 			t.Fatalf("normalized context lost: %v", r.Header)
 		}
-	}), &Config{DisableForwardAuth: true, DisableDefaultCFIPs: true}, "inner")
+	}), &Config{DisableForwardAuth: true, DisableDefaultCFIPs: true, TrustedProxyIPs: []string{"192.0.2.7/32"}}, "inner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +70,39 @@ func TestRepeatedMiddlewarePreservesCanonicalClient(t *testing.T) {
 	outer.ServeHTTP(httptest.NewRecorder(), request)
 	if !called {
 		t.Fatal("allowed nested control was not served")
+	}
+}
+
+func TestStricterMiddlewareCannotInheritWeakerTrust(t *testing.T) {
+	for _, allowed := range []bool{false, true} {
+		request := httptest.NewRequest("GET", "http://app.example.test/", nil)
+		request.RemoteAddr = "192.0.2.7:1234"
+		request.Header.Set(xForwardFor, "10.0.0.1, 203.0.113.9")
+		innerConfig := &Config{DisableForwardAuth: true, DisableDefaultCFIPs: true}
+		if allowed {
+			innerConfig.TrustedProxyIPs = []string{"192.0.2.7/32"}
+		}
+		called := false
+		inner, err := New(context.Background(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(204)
+		}), innerConfig, "stricter")
+		if err != nil {
+			t.Fatal(err)
+		}
+		outer, err := New(context.Background(), inner, &Config{DisableForwardAuth: true,
+			DisableDefaultCFIPs: true, TrustedProxyIPs: []string{"192.0.2.7/32"}}, "outer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		outer.ServeHTTP(recorder, request)
+		if called != allowed {
+			t.Fatalf("cross-profile authority: served=%v allowed=%v", called, allowed)
+		}
+		if !allowed && recorder.Code != 400 {
+			t.Fatalf("stricter boundary status %d", recorder.Code)
+		}
 	}
 }
 
