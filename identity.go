@@ -258,6 +258,11 @@ func (p *Badger) applyClientIdentity(req *http.Request) (string, error) {
 		identity.profile, identity.generation, identity.scope = p.identityProfile, p.identityGeneration, p.identityScope
 	}
 	*req = *req.WithContext(context.WithValue(req.Context(), identityContextKey{}, identity))
+	// Consume the original assertion before emitting canonical fields: the custom
+	// name may intentionally alias XFF/X-Real-IP, whose sanitized output must stay.
+	if p.customIPHeader != "" {
+		req.Header.Del(p.customIPHeader)
+	}
 	req.Header.Set(xForwardFor, identity.client)
 	req.Header.Set(xRealIP, identity.client)
 	req.Header.Set("X-Forwarded-Host", identity.host)

@@ -116,6 +116,44 @@ func TestBroadPrivateAndGlobalProxyTrustRejected(t *testing.T) {
 	}
 }
 
+func TestCustomAssertionIsConsumedAndNeverForwarded(t *testing.T) {
+	for _, peer := range []string{"203.0.113.9:1234", "192.0.2.7:1234", "198.51.100.2:1234"} {
+		for _, header := range []string{"Vendor-Client-IP", "X-Forwarded-For", "X-Real-IP"} {
+			t.Run(peer+"/"+header, func(t *testing.T) {
+				request := httptest.NewRequest("GET", "http://app.example.test/", nil)
+				request.RemoteAddr = peer
+				request.Header.Set(xForwardFor, "203.0.113.9")
+				request.Header.Set(header, "203.0.113.9")
+				if peer != "198.51.100.2:1234" {
+					request.Header.Set(header, "10.0.0.1")
+				}
+				if peer == "192.0.2.7:1234" && header == "X-Forwarded-For" {
+					request.Header.Set(header, "10.0.0.1, 203.0.113.9")
+				}
+				called := false
+				handler, err := New(context.Background(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					called = true
+					if header == "Vendor-Client-IP" && r.Header.Get(header) != "" {
+						t.Error("raw custom assertion forwarded")
+					}
+					if r.Header.Get(xForwardFor) != "203.0.113.9" || r.Header.Get(xRealIP) != "203.0.113.9" {
+						t.Error("canonical client headers lost")
+					}
+				}), &Config{DisableForwardAuth: true, DisableDefaultCFIPs: true,
+					TrustIP: []string{"198.51.100.0/24"}, TrustedProxyIPs: []string{"192.0.2.7/32"},
+					CustomIPHeader: header}, "test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				handler.ServeHTTP(httptest.NewRecorder(), request)
+				if !called {
+					t.Error("allowed control was not served")
+				}
+			})
+		}
+	}
+}
+
 func TestAmbiguousAssertionsAndForgedPublicContext(t *testing.T) {
 	for _, mutate := range []func(*http.Request){
 		func(r *http.Request) {
