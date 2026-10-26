@@ -22,6 +22,9 @@ type Config struct {
 	AccessTokenHeader           string   `json:"accessTokenHeader,omitempty"`
 	DisableForwardAuth          bool     `json:"disableForwardAuth,omitempty"`
 	TrustIP                     []string `json:"trustip,omitempty"`
+	TrustedProxyIPs             []string `json:"trustedProxyIPs,omitempty"`
+	AllowedHosts                []string `json:"allowedHosts,omitempty"`
+	AllowedSchemes              []string `json:"allowedSchemes,omitempty"`
 	DisableDefaultCFIPs         bool     `json:"disableDefaultCFIPs,omitempty"`
 	CustomIPHeader              string   `json:"customIPHeader,omitempty"`
 	RealIPHeader                string   `json:"realIpHeader,omitempty"`
@@ -59,6 +62,9 @@ type Badger struct {
 	accessTokenHeader           string
 	disableForwardAuth          bool
 	trustIP                     []*net.IPNet
+	trustedProxyIP              []*net.IPNet
+	allowedHosts                []string
+	allowedSchemes              []string
 	customIPHeader              string
 	realIPHeader                string
 	remoteUserIDHeader          string
@@ -144,6 +150,8 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		accessTokenHeader:           config.AccessTokenHeader,
 		disableForwardAuth:          config.DisableForwardAuth,
 		customIPHeader:              config.CustomIPHeader,
+		allowedHosts:                config.AllowedHosts,
+		allowedSchemes:              config.AllowedSchemes,
 		realIPHeader:                config.RealIPHeader,
 		remoteUserIDHeader:          stringOrDefault(config.RemoteUserIDHeader, defaultRemoteUserIDHeader),
 		remoteVirtualApiKeyIDHeader: stringOrDefault(config.RemoteVirtualApiKeyIDHeader, defaultRemoteVirtualApiKeyIDHeader),
@@ -186,12 +194,26 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		}
 	}
 
+	for _, cidr := range config.TrustedProxyIPs {
+		address, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, err
+		}
+		ones, bits := network.Mask.Size()
+		if ones == 0 || ((address.IsPrivate() || address.IsLoopback()) && ones != bits) {
+			return nil, fmt.Errorf("broad private or global forwarding trust is forbidden")
+		}
+		badger.trustedProxyIP = append(badger.trustedProxyIP, network)
+	}
 	return badger, nil
 }
 
 func (p *Badger) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	realIP := p.getRealIP(req)
-	p.setIPHeaders(req, realIP)
+	realIP, identityErr := p.applyClientIdentity(req)
+	if identityErr != nil {
+		http.Error(rw, "Invalid client identity", http.StatusBadRequest)
+		return
+	}
 
 	if p.disableForwardAuth {
 		p.next.ServeHTTP(rw, req)
@@ -486,33 +508,6 @@ func (p *Badger) renderRedirectPage(redirectURL string) string {
 </html>`, redirectURL, redirectURL)
 }
 
-func (p *Badger) getRealIP(req *http.Request) string {
-	// Check if request comes from a trusted source
-	isTrusted := p.isTrustedIP(req.RemoteAddr)
-
-	// If custom IP header is configured, use it
-	if p.customIPHeader != "" {
-		if customIP := req.Header.Get(p.customIPHeader); customIP != "" && isTrusted {
-			return customIP
-		}
-	}
-
-	// Default: use CF-Connecting-IP if from trusted source
-	if isTrusted {
-		if cfIP := req.Header.Get(cfConnectingIP); cfIP != "" {
-			return cfIP
-		}
-	}
-
-	// Fallback: extract IP from RemoteAddr
-	ip, _, err := net.SplitHostPort(req.RemoteAddr)
-	if err != nil {
-		// If parsing fails, return RemoteAddr as-is (might be just IP without port)
-		return req.RemoteAddr
-	}
-	return ip
-}
-
 func (p *Badger) stripSessionParam(req *http.Request) {
 	query := req.URL.Query()
 	modified := false
@@ -586,41 +581,4 @@ func (p *Badger) isTrustedIP(remoteAddr string) bool {
 		}
 	}
 	return false
-}
-
-func (p *Badger) setIPHeaders(req *http.Request, realIP string) {
-	isTrusted := p.isTrustedIP(req.RemoteAddr)
-
-	if isTrusted {
-		// Handle CF-Visitor header for scheme
-		if req.Header.Get(cfVisitor) != "" {
-			var cfVisitorValue struct {
-				Scheme string `json:"scheme"`
-			}
-			if err := json.Unmarshal([]byte(req.Header.Get(cfVisitor)), &cfVisitorValue); err == nil {
-				req.Header.Set(xForwardProto, cfVisitorValue.Scheme)
-			}
-		}
-
-		// Set headers with the real IP (already extracted from CF-Connecting-IP or custom header)
-		req.Header.Set(xForwardFor, realIP)
-		req.Header.Set(xRealIP, realIP)
-	} else {
-		// Not from trusted source, use direct IP
-		req.Header.Set(xRealIP, realIP)
-		// Remove CF headers if present
-		req.Header.Del(cfVisitor)
-		req.Header.Del(cfConnectingIP)
-	}
-
-	// realIPHeader is a non-standard header name (opt-in via config), set
-	// unconditionally on every request regardless of trust. It exists for
-	// deployments with another proxy between Badger and the backend that
-	// unconditionally overwrites X-Forwarded-For/X-Real-Ip instead of
-	// appending to them - a proxy like that has no reason to touch a header
-	// name it doesn't recognize, so this survives where the standard ones
-	// don't
-	if p.realIPHeader != "" {
-		req.Header.Set(p.realIPHeader, realIP)
-	}
 }
