@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/fosrl/badger/ips"
 	"github.com/fosrl/badger/version"
@@ -187,13 +188,12 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	}
 
 	if config.TrustIP != nil {
-		for _, v := range config.TrustIP {
-			_, trustip, err := net.ParseCIDR(v)
-			if err != nil {
-				return nil, err
-			}
-			badger.trustIP = append(badger.trustIP, trustip)
+		parsed, err := parsedTrustIP(config.TrustIP)
+		if err != nil {
+			return nil, err
 		}
+		// Capacity is capped so a later append copies instead of writing into the shared list.
+		badger.trustIP = parsed[:len(parsed):len(parsed)]
 	}
 
 	if !config.DisableDefaultCFIPs {
@@ -221,6 +221,42 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, fmt.Errorf("authoritative ingress requires profile, generation and scope")
 	}
 	return badger, nil
+}
+
+// Traefik builds one instance of this middleware per router that references it and hands every
+// instance the same trustip list, so a configuration reload used to parse the list once per
+// router: 955 entries across 672 routers is 641,760 parses, run by the plugin interpreter. The
+// parsed list is kept per distinct list and shared; it is never written after it is stored.
+var (
+	trustIPCacheMu sync.Mutex
+	trustIPCache   = map[string][]*net.IPNet{}
+	trustIPParses  int
+)
+
+const trustIPCacheLimit = 8
+
+func parsedTrustIP(values []string) ([]*net.IPNet, error) {
+	key := strings.Join(values, ",")
+	trustIPCacheMu.Lock()
+	defer trustIPCacheMu.Unlock()
+	if cached, ok := trustIPCache[key]; ok {
+		return cached, nil
+	}
+	parsed := make([]*net.IPNet, 0, len(values))
+	for _, v := range values {
+		_, network, err := net.ParseCIDR(v)
+		if err != nil {
+			return nil, err
+		}
+		parsed = append(parsed, network)
+	}
+	trustIPParses++
+	// A changed list is a new key. Drop the old ones rather than keep every list ever seen.
+	if len(trustIPCache) >= trustIPCacheLimit {
+		trustIPCache = map[string][]*net.IPNet{}
+	}
+	trustIPCache[key] = parsed
+	return parsed, nil
 }
 
 func (p *Badger) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
