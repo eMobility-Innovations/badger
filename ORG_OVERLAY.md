@@ -40,3 +40,12 @@ Downstream generators must pin an org commit, copy runtime Go sources and plugin
 manifest together, and record all payload hashes. Do not label the resulting
 bundle byte-identical to upstream v1.7.0. Validate via `go test ./...` on the gate
 runner and actual Traefik local-plugin wire controls before deployment.
+
+## trustip is parsed once per distinct list
+
+Traefik builds one instance of the middleware per router that references it and gives every
+instance the same `trustip` list. Upstream parses the list in `New`, so a configuration reload
+parsed it once per router, inside the plugin interpreter: 955 entries across 672 routers held
+the old routing live for 20-70 s after every change on the edges (measured 2026-11-26). The
+parsed list is now kept per distinct list and shared by every instance; it is never written
+after it is stored, and at most 8 lists are kept. Generic, reported upstream.
